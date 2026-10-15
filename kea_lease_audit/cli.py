@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from . import collectors, compare, config, ha, monitor, sshconn
+from . import __version__, collectors, compare, config, ha, monitor, sshconn
 
 EXIT_OK, EXIT_DRIFT, EXIT_ERROR = 0, 1, 2
 
@@ -144,6 +144,7 @@ def _select_regions(args, fail):
 def main(argv=None):
     p = argparse.ArgumentParser(prog="kea-lease-audit",
                                 description="Verify Kea HA peers hold identical lease databases.")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("-c", "--config", default="servers.yaml", help="inventory YAML (default: servers.yaml)")
     p.add_argument("-r", "--region", action="append", help="only audit this region (repeatable)")
     p.add_argument("--check", choices=["leases", "ha"], default="leases",
