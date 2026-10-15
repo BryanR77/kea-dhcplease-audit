@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Local inventories (hostnames/addresses); commit servers.example.yaml instead
+servers.yaml
+servers.*.yaml
+!servers.example.yaml

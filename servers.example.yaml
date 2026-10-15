@@ -1,0 +1,64 @@
+# Inventory for kea-lease-audit.
+# Settings cascade: defaults -> region -> server. Any key under `defaults`
+# can be overridden on a region or an individual server.
+
+defaults:
+  method: api            # api (Kea Control Agent / lease_cmds hook) or ssh (read memfile CSVs)
+  families: [4]          # add 6 to audit DHCPv6 leases too
+  timeout: 30
+
+  api:
+    scheme: http         # https for TLS; set ca_file / cert_file / key_file for mTLS
+    port: 8000
+    service: true        # true = "dhcp4"/"dhcp6" via kea-ctrl-agent; null = talk to the daemon directly (Kea 3.x)
+    page_size: 1000
+    # username: audit
+    # password_env: KEA_API_PASSWORD   # read the password from this environment variable
+    tunnel: false        # true = reach the API through an ssh port-forward (uses the ssh settings below)
+    tunnel_host: 127.0.0.1   # API address as seen from the server
+
+  ssh:
+    # user: kea-audit
+    # identity_file: ~/.ssh/kea_audit         # private key (chmod 600); only this key is offered
+    # known_hosts_file: ~/.ssh/kea_known_hosts # host keys for these servers, if not in ~/.ssh/known_hosts
+    # options: ["ProxyJump=bastion.example.net"]
+    sudo: false          # true runs `sudo -n` on the server (needs NOPASSWD)
+    lease_dir: /var/lib/kea
+    lease_file4: kea-leases4.csv
+    lease_file6: kea-leases6.csv
+
+  compare:
+    expiry_grace: 60     # seconds; leases expiring this close to now are not compared
+    time_tolerance: 0    # allowed cltt difference between peers (HA copies it exactly)
+    settle_window: 30    # differences on leases touched this recently are treated as in flight
+    recheck_rounds: 1    # re-fetch this many times; only differences that persist are reported
+    recheck_delay: 15
+    ignore_fields: []    # e.g. [hostname, fqdn_fwd, fqdn_rev]
+
+regions:
+  lab:
+    servers:
+      - name: dhcp1
+        host: dhcp1.lab.example.net
+      - name: dhcp2
+        host: dhcp2.lab.example.net
+
+  # Kea 2.6.x production pair: Control Agent bound to 127.0.0.1:8000, reached via ssh tunnel
+  # production:
+  #   api: {port: 8000, service: true, tunnel: true}
+  #   ssh:
+  #     user: kea-audit
+  #     identity_file: ~/.ssh/kea_audit
+  #     known_hosts_file: ~/.ssh/kea_known_hosts
+  #   servers:
+  #     - host: dhcp-p1.example.net
+  #     - host: dhcp-p2.example.net
+
+  # Example of a second region using ssh and three servers (hot-standby + backup)
+  # datacenter-east:
+  #   method: ssh
+  #   ssh: {user: kea-audit, sudo: true}
+  #   servers:
+  #     - host: dhcp-e1.example.net
+  #     - host: dhcp-e2.example.net
+  #     - host: dhcp-e3.example.net
