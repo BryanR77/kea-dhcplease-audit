@@ -23,6 +23,8 @@ defaults:
     # known_hosts_file: ~/.ssh/kea_known_hosts # host keys for these servers, if not in ~/.ssh/known_hosts
     # options: ["ProxyJump=bastion.example.net"]
     sudo: false          # true runs `sudo -n` on the server (needs NOPASSWD)
+    control_persist: 600 # reuse one background ssh connection per server for this long after last use (0 = off)
+    # control_dir: ~/.ssh/kea-lease-audit   # where its sockets live (default: $XDG_RUNTIME_DIR/kea-lease-audit)
     lease_dir: /var/lib/kea
     lease_file4: kea-leases4.csv
     lease_file6: kea-leases6.csv
@@ -34,6 +36,7 @@ defaults:
     recheck_rounds: 1    # re-fetch this many times; only differences that persist are reported
     recheck_delay: 15
     ignore_fields: []    # e.g. [hostname, fqdn_fwd, fqdn_rev]
+    clock_warn: 30       # warn when a server's clock is this many seconds off the monitoring host or its HA partner
 
 regions:
   lab:

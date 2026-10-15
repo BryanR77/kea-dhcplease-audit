@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from . import collectors, compare, config
+from . import collectors, compare, config, ha, monitor, sshconn
 
 EXIT_OK, EXIT_DRIFT, EXIT_ERROR = 0, 1, 2
 
@@ -21,6 +21,7 @@ def snapshot_region(region, family):
 
 def audit_region(region, family, log):
     settings = region.compare
+    t0 = time.time()
     snaps = snapshot_region(region, family)
     found, stats = compare.compare(snaps, settings)
     first_snaps = snaps
@@ -42,7 +43,7 @@ def audit_region(region, family, log):
     counts = {s.server.name: sum(1 for l in s.leases.values() if l.is_live(s.started))
               for s in first_snaps}
     return {"family": family, "stats": stats, "live_counts": counts,
-            "clock_offsets": offsets, "discrepancies": found}
+            "clock_offsets": offsets, "discrepancies": found, "duration": time.time() - t0}
 
 
 def _fmt_ts(ts):
@@ -109,38 +110,94 @@ def render_json(results, out):
     out.write("\n")
 
 
+def render_ha_text(results, out):
+    for region_name, fam_results in results.items():
+        for fam, servers, findings in fam_results:
+            state = monitor.worst([f.level for f in findings])
+            print(f"\n[{region_name}] HA DHCPv{fam}: {monitor.STATE_NAMES[state]}", file=out)
+            for r in servers:
+                for rel in r.relationships:
+                    peers = ", ".join(f"{x.get('server-name')} last-state={x.get('last-state')} "
+                                      f"in-touch={x.get('in-touch')} age={x.get('age')}s "
+                                      f"skew={x.get('clock-skew')}s" for x in rel["remotes"])
+                    print(f"  {r.server.name:<16} {rel['mode']} {rel['local'].get('role')} "
+                          f"state={rel['local'].get('state')} unsent={r.unsent_updates}"
+                          + (f" | {peers}" if peers else ""), file=out)
+            for f in findings:
+                print(f"  ! [{monitor.STATE_NAMES[f.level]}] {f.text}", file=out)
+
+
+def _select_regions(args, fail):
+    try:
+        regions = config.load(args.config)
+    except (OSError, config.ConfigError) as e:
+        return fail(f"config error: {e}")
+    if args.region:
+        wanted = set(args.region)
+        unknown = wanted - {r.name for r in regions}
+        if unknown:
+            return fail(f"unknown region(s): {', '.join(sorted(unknown))}")
+        regions = [r for r in regions if r.name in wanted]
+    return regions
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="kea-lease-audit",
                                 description="Verify Kea HA peers hold identical lease databases.")
     p.add_argument("-c", "--config", default="servers.yaml", help="inventory YAML (default: servers.yaml)")
     p.add_argument("-r", "--region", action="append", help="only audit this region (repeatable)")
-    p.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    p.add_argument("--check", choices=["leases", "ha"], default="leases",
+                   help="leases: compare lease databases (default); ha: quick HA health from Kea's status")
+    p.add_argument("-o", "--output", choices=["text", "json", "nagios", "checkmk"], default="text",
+                   help="nagios: plugin output and exit codes; checkmk: local-check lines")
+    p.add_argument("--json", action="store_const", const="json", dest="output", help="same as --output json")
+    p.add_argument("--warn", type=int, default=1, metavar="N",
+                   help="nagios/checkmk: WARNING at N or more discrepancies (default 1)")
+    p.add_argument("--crit", type=int, default=1, metavar="N",
+                   help="nagios/checkmk: CRITICAL at N or more discrepancies (default 1)")
     p.add_argument("--no-recheck", action="store_true", help="report first-round results without rechecking")
+    p.add_argument("--close-ssh", action="store_true",
+                   help="close the background ssh connections for the selected servers, then exit")
     p.add_argument("-q", "--quiet", action="store_true", help="no progress output on stderr")
     args = p.parse_args(argv)
+    monitoring = args.output in ("nagios", "checkmk")
 
-    try:
-        regions = config.load(args.config)
-    except (OSError, config.ConfigError) as e:
-        print(f"config error: {e}", file=sys.stderr)
-        return EXIT_ERROR
-    if args.region:
-        wanted = set(args.region)
-        unknown = wanted - {r.name for r in regions}
-        if unknown:
-            print(f"unknown region(s): {', '.join(sorted(unknown))}", file=sys.stderr)
-            return EXIT_ERROR
-        regions = [r for r in regions if r.name in wanted]
+    def fail(msg):
+        if monitoring:
+            print(f"KEA UNKNOWN - {msg}")
+            return None
+        print(msg, file=sys.stderr)
+        return None
 
-    log = (lambda msg: None) if args.quiet else (lambda msg: print(msg, file=sys.stderr))
-    results, errors, drift = {}, False, False
+    regions = _select_regions(args, fail)
+    if regions is None:
+        return monitor.UNKNOWN if monitoring else EXIT_ERROR
+
+    if args.close_ssh:
+        for region in regions:
+            for server in region.servers:
+                sshconn.close(server)
+        return EXIT_OK
+
+    quiet = args.quiet or monitoring
+    log = (lambda msg: None) if quiet else (lambda msg: print(msg, file=sys.stderr))
+    if args.check == "ha":
+        return _run_ha(regions, args, log)
+    return _run_leases(regions, args, log)
+
+
+def _families(region):
+    return sorted({f for s in region.servers for f in s.settings["families"]})
+
+
+def _run_leases(regions, args, log):
+    results, checks, errors, drift = {}, [], False, False
     for region in regions:
         if args.no_recheck:
             region.compare["recheck_rounds"] = 0
-        families = sorted({f for s in region.servers for f in s.settings["families"]})
         log(f"auditing {region.name}: {', '.join(s.name for s in region.servers)}")
         results[region.name] = []
-        for fam in families:
+        for fam in _families(region):
             try:
                 r = audit_region(region, fam, log)
                 drift |= bool(r["discrepancies"])
@@ -148,11 +205,49 @@ def main(argv=None):
                 r = {"family": fam, "error": str(e)}
                 errors = True
             results[region.name].append(r)
+            checks.append(monitor.lease_check(region.name, r, args.warn, args.crit,
+                                              region.compare["clock_warn"]))
 
-    (render_json if args.json else render_text)(results, sys.stdout)
+    if args.output == "nagios":
+        return monitor.render_nagios(checks, sys.stdout)
+    if args.output == "checkmk":
+        return monitor.render_checkmk(checks, sys.stdout)
+    (render_json if args.output == "json" else render_text)(results, sys.stdout)
     if errors:
         return EXIT_ERROR
     return EXIT_DRIFT if drift else EXIT_OK
+
+
+def _run_ha(regions, args, log):
+    results, checks = {}, []
+    for region in regions:
+        log(f"checking HA in {region.name}: {', '.join(s.name for s in region.servers)}")
+        results[region.name] = []
+        for fam in _families(region):
+            servers, findings = ha.check_region(region, fam, region.compare["clock_warn"])
+            results[region.name].append((fam, servers, findings))
+            checks.append(monitor.ha_check(region.name, fam, servers, findings))
+
+    if args.output == "nagios":
+        return monitor.render_nagios(checks, sys.stdout)
+    if args.output == "checkmk":
+        return monitor.render_checkmk(checks, sys.stdout)
+    if args.output == "json":
+        doc = {name: [{"family": fam,
+                       "state": monitor.STATE_NAMES[monitor.worst([f.level for f in findings])],
+                       "findings": [{"level": monitor.STATE_NAMES[f.level], "text": f.text} for f in findings],
+                       "servers": {r.server.name: {"relationships": r.relationships,
+                                                   "unsent_updates": r.unsent_updates} for r in servers}}
+                      for fam, servers, findings in fam_results]
+               for name, fam_results in results.items()}
+        json.dump(doc, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        render_ha_text(results, sys.stdout)
+    state = monitor.worst([c.state for c in checks])
+    if state == monitor.OK:
+        return EXIT_OK
+    return EXIT_ERROR if state == monitor.UNKNOWN else EXIT_DRIFT
 
 
 if __name__ == "__main__":

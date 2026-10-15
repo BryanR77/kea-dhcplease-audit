@@ -39,6 +39,10 @@ BUILTIN_DEFAULTS = {
         "identity_file": None,     # private key to use; ssh then offers only this key
         "known_hosts_file": None,  # host keys for these servers (default: ~/.ssh/known_hosts)
         "options": [],        # extra -o options, e.g. ["ProxyJump=bastion"]
+        # Keep a background master connection for this many seconds after last
+        # use, so repeated runs reuse one login (0 = new login every time).
+        "control_persist": 600,
+        "control_dir": None,      # default: $XDG_RUNTIME_DIR/kea-lease-audit or ~/.ssh/kea-lease-audit
         "sudo": False,
         "lease_dir": "/var/lib/kea",
         "lease_file4": "kea-leases4.csv",
@@ -57,6 +61,9 @@ BUILTIN_DEFAULTS = {
         "recheck_rounds": 1,
         "recheck_delay": 15,
         "ignore_fields": [],  # e.g. ["hostname", "fqdn_fwd", "fqdn_rev"]
+        # Warn when a server's clock is this far off the monitoring host, or
+        # (HA check) off its partner. Kea's HA gives up at 60s.
+        "clock_warn": 30,
     },
 }
 

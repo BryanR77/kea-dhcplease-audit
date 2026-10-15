@@ -4,15 +4,13 @@ import base64
 import contextlib
 import json
 import shlex
-import socket
 import ssl
-import subprocess
 import time
 import urllib.error
 import urllib.request
 
 from . import lease as lease_mod
-from . import memfile
+from . import memfile, sshconn
 
 
 class CollectError(Exception):
@@ -39,14 +37,35 @@ class Snapshot:
 
 
 def collect(server, family):
-    if server.method == "api":
-        return _collect_api(server, family)
-    return _collect_ssh(server, family)
+    try:
+        if server.method == "api":
+            with api_endpoint(server) as endpoint:
+                return _collect_api_pages(server, family, endpoint)
+        return _collect_ssh(server, family)
+    except sshconn.SSHError as e:
+        raise CollectError(str(e)) from e
 
 
 # --------------------------------------------------------------------------- API
 
-def _api_call(server, family, command, arguments=None, endpoint=None):
+@contextlib.contextmanager
+def api_endpoint(server, tunnel=None):
+    """Yield the (host, port) to reach the API at: a tunnel's local end, or None for direct."""
+    api = server.settings["api"]
+    if tunnel is None:
+        tunnel = api.get("tunnel")
+    if not tunnel:
+        yield None
+        return
+    try:
+        with sshconn.tunnel(server, api["tunnel_host"], api["port"]) as endpoint:
+            yield endpoint
+    except sshconn.SSHError as e:
+        raise CollectError(str(e)) from e
+
+
+def api_call(server, family, command, arguments=None, endpoint=None):
+    """Send one command; returns (response object, HTTP Date header)."""
     api = server.settings["api"]
     host, port = endpoint or (server.host, api["port"])
     url = f"{api['scheme']}://{host}:{port}{api['path']}"
@@ -87,7 +106,12 @@ def _api_call(server, family, command, arguments=None, endpoint=None):
             hint = " (check api.username / password_env and the server's authentication settings)"
         raise CollectError(f"{server.name}: HTTP {e.code} from {url}{hint}: {e.read()[:200]!r}") from e
     except (urllib.error.URLError, OSError, ValueError) as e:
-        raise CollectError(f"{server.name}: cannot reach Kea API at {url}: {e}") from e
+        where = url
+        if endpoint:
+            where = (f"{api['tunnel_host']}:{api['port']} via ssh tunnel ({e}; is the API listening "
+                     f"there, and does sshd allow TCP forwarding?)")
+            raise CollectError(f"{server.name}: cannot reach Kea API at {where}") from e
+        raise CollectError(f"{server.name}: cannot reach Kea API at {where}: {e}") from e
 
     # The control agent wraps responses in a list (one per service); the DHCP
     # daemon's own listener returns a bare object.
@@ -98,13 +122,6 @@ def _api_call(server, family, command, arguments=None, endpoint=None):
     return payload, date_hdr
 
 
-def _collect_api(server, family):
-    if server.settings["api"].get("tunnel"):
-        with _ssh_tunnel(server) as endpoint:
-            return _collect_api_pages(server, family, endpoint)
-    return _collect_api_pages(server, family, None)
-
-
 def _collect_api_pages(server, family, endpoint):
     cmd = f"lease{family}-get-page"
     page_size = server.settings["api"]["page_size"]
@@ -113,7 +130,7 @@ def _collect_api_pages(server, family, endpoint):
     started = time.time()
     server_time = None
     while True:
-        resp, date_hdr = _api_call(server, family, cmd, {"from": cursor, "limit": page_size}, endpoint)
+        resp, date_hdr = api_call(server, family, cmd, {"from": cursor, "limit": page_size}, endpoint)
         if server_time is None and date_hdr:
             server_time = _parse_http_date(date_hdr)
         result = resp.get("result")
@@ -147,61 +164,6 @@ def _parse_http_date(value):
 _MARK = "@@KEA-LEASE-AUDIT@@"
 
 
-def _ssh_base(server, extra=()):
-    s = server.settings["ssh"]
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={min(server.settings['timeout'], 15)}",
-           "-p", str(s["port"])]
-    if s.get("identity_file"):
-        # Offer only this key, so keys in a running agent can't use up the
-        # server's MaxAuthTries first.
-        cmd += ["-i", s["identity_file"], "-o", "IdentitiesOnly=yes"]
-    if s.get("known_hosts_file"):
-        cmd += ["-o", f"UserKnownHostsFile={s['known_hosts_file']}"]
-    for opt in s.get("options") or []:
-        cmd += ["-o", opt]
-    target = f"{s['user']}@{server.host}" if s.get("user") else server.host
-    return cmd + list(extra) + [target]
-
-
-def _free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-@contextlib.contextmanager
-def _ssh_tunnel(server):
-    """Forward a local port to the API address as seen from the server (usually its loopback)."""
-    api = server.settings["api"]
-    lport = _free_port()
-    forward = f"127.0.0.1:{lport}:{api['tunnel_host']}:{api['port']}"
-    cmd = _ssh_base(server, ["-N", "-o", "ExitOnForwardFailure=yes", "-L", forward])
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE, text=True)
-    try:
-        deadline = time.time() + server.settings["timeout"]
-        while True:
-            if proc.poll() is not None:
-                raise CollectError(f"{server.name}: ssh tunnel failed ({proc.returncode}): "
-                                   f"{proc.stderr.read().strip()}")
-            try:
-                socket.create_connection(("127.0.0.1", lport), timeout=1).close()
-                break
-            except OSError:
-                if time.time() > deadline:
-                    raise CollectError(f"{server.name}: ssh tunnel did not come up within "
-                                       f"{server.settings['timeout']}s")
-                time.sleep(0.1)
-        yield ("127.0.0.1", lport)
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        proc.stderr.close()
-
-
 def _collect_ssh(server, family):
     s = server.settings["ssh"]
     base = s["lease_dir"].rstrip("/") + "/" + s[f"lease_file{family}"]
@@ -215,11 +177,7 @@ def _collect_ssh(server, family):
         remote = "sudo -n " + remote
 
     started = time.time()
-    try:
-        proc = subprocess.run(_ssh_base(server) + [remote], capture_output=True, text=True,
-                              timeout=server.settings["timeout"] * 4)
-    except subprocess.TimeoutExpired as e:
-        raise CollectError(f"{server.name}: ssh timed out") from e
+    proc = sshconn.run(server, remote, timeout=server.settings["timeout"] * 4)
     finished = time.time()
     if proc.returncode != 0:
         raise CollectError(f"{server.name}: ssh failed ({proc.returncode}): {proc.stderr.strip()}")
