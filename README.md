@@ -13,6 +13,20 @@ Exit codes for text/JSON output: `0` in sync, `1` discrepancies found, `2` a
 server could not be read. For monitoring systems, use `--output nagios` or
 `--output checkmk` (see [Monitoring](#monitoring)).
 
+## Installing
+
+Each [release](https://github.com/BryanR77/kea-dhcplease-audit/releases) has a
+wheel, an sdist, and `kea-lease-audit.pyz`. The `.pyz` is a single executable file
+with PyYAML bundled. It needs only `python3` (3.9+), which makes it the easiest
+way to put the tool on a monitoring host:
+
+    curl -LO https://github.com/BryanR77/kea-dhcplease-audit/releases/latest/download/kea-lease-audit.pyz
+    sudo install -m 755 kea-lease-audit.pyz /usr/local/bin/kea-lease-audit
+    kea-lease-audit --version
+
+You can also `pip install` the wheel from a release. Either way you get the
+`kea-lease-audit` command that the [Monitoring](#monitoring) examples use.
+
 ## Collection methods
 
 | method | how | server needs |
@@ -151,6 +165,18 @@ Keep the plugin timeout comfortably above that.
 ## Tests
 
     python3 -m unittest -v
+
+## Releasing
+
+Push a version tag from `main`:
+
+    git tag v0.2.0
+    git push origin v0.2.0
+
+The Release workflow runs the tests, then builds the wheel, sdist and `.pyz`. It
+smoke-tests the `.pyz`, then publishes a GitHub release with generated notes and
+`SHA256SUMS`. The package version comes from the tag (setuptools-scm), so nothing
+needs to be edited before tagging.
 
 ## License
 

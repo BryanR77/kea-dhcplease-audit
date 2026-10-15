@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 .venv/
+kea_lease_audit/_version.py
 
 # Local inventories (hostnames/addresses); commit servers.example.yaml instead
 servers.yaml

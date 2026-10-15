@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs the tags
+      - uses: actions/setup-python@v5
+        with:
+          # Build with the oldest supported Python so the bundled PyYAML in
+          # the zipapp is a version that still supports it.
+          python-version: "3.9"
+      - run: pip install build
+      - run: python -m build
+      - name: Check version matches tag
+        run: |
+          want=${GITHUB_REF_NAME#v}
+          ls dist/kea_lease_audit-"$want"-py3-none-any.whl
+      - run: scripts/build-pyz.sh dist/kea_lease_audit-*.whl dist/kea-lease-audit.pyz
+      - name: Smoke-test zipapp
+        run: |
+          python dist/kea-lease-audit.pyz --version
+          # -S hides site-packages, so this proves the bundled PyYAML loads
+          # the config, and that exit codes survive (unknown region -> 2).
+          rc=0; python -S dist/kea-lease-audit.pyz -c servers.example.yaml -r no-such-region -q || rc=$?
+          test "$rc" -eq 2
+      - run: cd dist && sha256sum * > SHA256SUMS
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
