@@ -152,6 +152,10 @@ files named `check_*`):
     exec kea-lease-audit -c /etc/kea-lease-audit/servers.yaml -o nagios "$@"
 
 Add it as a service with parameters such as `-r prod` or `--check ha`.
+LibreNMS ties each service to a device and always appends `-H <device hostname>`.
+The tool accepts `-H` and ignores it, because the servers to audit come from
+the inventory and `-r`, so the service can sit on any device, for example the
+monitoring host itself.
 LibreNMS polls services every 5 minutes, which suits the lease check. When
 drift triggers a recheck, a run takes at least `recheck_delay` (15s) longer.
 Keep the plugin timeout comfortably above that.

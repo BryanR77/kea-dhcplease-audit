@@ -160,6 +160,11 @@ def main(argv=None):
     p.add_argument("--close-ssh", action="store_true",
                    help="close the background ssh connections for the selected servers, then exit")
     p.add_argument("-q", "--quiet", action="store_true", help="no progress output on stderr")
+    # LibreNMS always appends -H <device hostname> to service checks (and Nagios
+    # configs often pass $HOSTADDRESS$ the same way). Servers come from the
+    # inventory and -r, so the value is accepted and ignored.
+    p.add_argument("-H", "--hostname", metavar="HOST",
+                   help="ignored; accepted because LibreNMS/Nagios pass the device's host")
     args = p.parse_args(argv)
     monitoring = args.output in ("nagios", "checkmk")
 
