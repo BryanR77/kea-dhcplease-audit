@@ -455,6 +455,14 @@ class EndToEndTests(unittest.TestCase):
         rc, _ = self._run(drift, "--warn", "1", "--crit", "5", output="nagios")
         self.assertEqual(rc, 1)
 
+    def test_hostname_arg_ignored(self):
+        # LibreNMS appends -H <device>; it must not break the check or pick servers.
+        same = [api_lease("10.0.0.1")]
+        rc, out = self._run(self._lab([self._fake_kea(same), self._fake_kea(same)]),
+                            "-H", "localhost", "-r", "lab", output="nagios")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("KEA LEASES LAB V4 OK - in sync"), out)
+
     def test_nagios_unreachable_is_unknown(self):
         cfg = {"defaults": {"timeout": 2, "api": {"port": 1}},
                "regions": {"lab": {"servers": [{"host": "127.0.0.1", "name": "a"},
